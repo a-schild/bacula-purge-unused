@@ -66,7 +66,7 @@ sub list_error_only {
 
     my %error_vols;
 
-    my $dbh = $dbconfig->connect();
+    my $dbh = $dbconfig->connect('AutoCommit' => 0);
     # $except_job is a command line argument
     my $q = $dbh->prepare(
         "SELECT m.VolumeName, j.JobStatus ".
@@ -106,14 +106,14 @@ sub list_recyclable {
 
     my $dbh = $dbconfig->connect();
     my $recycle = $dbh->prepare(
-        "SELECT volumename, lastwritten, volbytes, volstatus, volretention ".
-        "FROM media ".
-        "WHERE mediatype = 'File' AND ".
-        "   lastwritten + interval '$fuzz' < ".
-        "      NOW() -  volretention * interval '1 second'");
+        "SELECT VolumeName, LastWritten, VolBytes, VolStatus, VolRetention ".
+        "FROM Media ".
+        "WHERE MediaType = 'File' AND ".
+        "  DATE_ADD( LastWritten, interval $fuzz) < ".
+        "      DATE_SUB(NOW() , interval VolRetention second)");
 
     $recycle->execute();
-    my $vols = $recycle->fetchall_hashref('volumename');
+    my $vols = $recycle->fetchall_hashref('VolumeName');
     for my $vol (sort {
                           $vols->{$a}->{lastwritten} cmp $vols->{$b}->{lastwritten}
                       } keys %{$vols})
@@ -196,7 +196,7 @@ if ($remove) {
     print "Removing from database\n";
     print ".. deleting from Media\n";
     my $delete_media = $dbh->prepare(
-        "DELETE FROM media WHERE volumename IN ('" .
+        "DELETE FROM Media WHERE VolumeName IN ('" .
         join("','", keys %deletable) . "')");
     my $rv = $delete_media->execute() or die $delete_media->errstr;
     print ".... $rv rows deleted\n";
@@ -205,15 +205,15 @@ if ($remove) {
 
     print ".. deleting from JobMedia\n";
     my $delete_jobmedia = $dbh->prepare(
-        "DELETE FROM jobmedia
-             WHERE mediaid NOT IN (SELECT mediaid FROM Media)");
+        "DELETE FROM JobMedia
+             WHERE MediaId NOT IN (SELECT MediaId FROM Media)");
     $rv = $delete_jobmedia->execute() or die $delete_jobmedia->errstr;
     print ".... $rv rows deleted\n";
 
     print ".. deleting from File\n";
     my $delete_file = $dbh->prepare(
-        "DELETE FROM file
-             WHERE jobid NOT IN (SELECT jobid FROM jobmedia)");
+        "DELETE FROM File
+             WHERE JobId NOT IN (SELECT JobId FROM JobMedia)");
     $rv = $delete_file->execute() or die $delete_file->errstr;
     print ".... $rv rows deleted\n";
 
