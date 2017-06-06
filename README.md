@@ -6,7 +6,7 @@ Purge unused file media in bacula/bareos backups
 Based on the 1.4 version of http://heim.ifi.uio.no/kjetilho/hacks/bacula-purge-unused-1.4.tar.gz
 http://heim.ifi.uio.no/kjetilho/hacks/#bacula-purge-unused
 
-Usage: ./bacula-purge-unused [--debug] [--truncate] [--remove] [--error-only] [options]
+Usage: `./bacula-purge-unused [--debug] [--truncate] [--remove] [--error-only] [options]`
 
 ```
 Options:
@@ -28,7 +28,8 @@ Available options to configure database access:
 ```
 
 For DB configuration it is best to specify a file containing the DB connection config,
-for example in /etc/bareos/database.cf
+for example in `/etc/bareos/database.cf`
+You have to then specify it in the command line `--database-config /etc/bareos/database.cf`
 
 Such a file could look like this:  
 ```
