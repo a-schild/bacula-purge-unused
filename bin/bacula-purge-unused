@@ -1,0 +1,222 @@
+#! /usr/bin/perl -w
+
+# bacula-purge-unused 1.4
+# Copyright 2014-2016 <kjetil.homme@redpill-linpro.com>
+# Released under GPLv3 or later versions
+
+use strict;
+use warnings;
+use FindBin;
+use lib "$FindBin::Bin/../lib/site_perl";
+
+use DBI;
+use XML::Simple;
+use Time::Local;
+use Getopt::Long qw(:config bundling no_ignore_case require_order);
+use Bacula::DatabaseConfig;
+use Data::Dumper;
+
+my $datadirectory = '/srv/bacula/data';
+my $fuzz = "8 hour";
+my $except_job;
+my $error_only;
+my $remove;
+my $debug;
+my $truncate;
+
+sub usage {
+    print STDERR <<"_END_";
+Usage: $0 [--debug] [--truncate] [--remove] [--error-only] [options]
+
+Options:
+  --except-job N[,M...]]
+      for running jobs (may affect error-only status)
+ --fuzz-days N
+      only report files which are more than N days beyond expiry date.
+ --error-only
+      only report/remove files which only contain failed jobs
+ --data-directory DIR
+      where data lives (default /srv/bacula/data)
+
+_END_
+
+    print STDERR Bacula::DatabaseConfig::HELP_MESSAGE();
+    exit(64);
+}
+
+my $dbconfig = new Bacula::DatabaseConfig;
+
+GetOptions("debug" => \$debug,
+           "data-directory|d=s" => \$datadirectory,
+           "except-job=i" => \$except_job,
+           "fuzz-days=i" => sub { $fuzz = $_[1] * 86400 },
+           "error-only" => \$error_only,
+           "remove" => \$remove,
+           "truncate" => \$truncate)
+    or usage();
+
+die "--truncate is not implemented\n" if $truncate;
+
+sub failed {
+    $_[0] ne 'T' && $_[0] ne 'W';
+}
+
+sub list_error_only {
+    my ($dbconfig) = @_;
+
+    my %error_vols;
+
+    my $dbh = $dbconfig->connect();
+    # $except_job is a command line argument
+    my $q = $dbh->prepare(
+        "SELECT m.VolumeName, j.JobStatus ".
+        "FROM Media m JOIN JobMedia jm ON m.MediaId = jm.MediaId AND m.MediaType = 'File' ".
+        "JOIN Job j ON j.JobId = jm.JobId ".
+        ($except_job ? "WHERE j.JobId NOT IN ($except_job) " : "").
+        "GROUP BY m.VolumeName, j.JobStatus");
+
+    my $detail = $dbh->prepare(
+        "SELECT volumename, lastwritten, volbytes, volstatus, volretention ".
+        "FROM media");
+
+    $q->execute();
+    my $all = $q->fetchall_arrayref;
+    my %media;
+    for my $r (@{$all}) {
+        my ($vol, $status) = @{$r};
+        # Consider a running job to be a (future) successful job
+        $status = 'T' if ($status eq 'R');
+        $media{$vol} = $status
+            if !defined $media{$vol} || failed($media{$vol});
+    }
+
+    for my $vol (keys %media) {
+        if (failed($media{$vol})) {
+            # make structured data when/if we need it
+            $error_vols{$vol} = "error-only";
+        }
+    }
+    return %error_vols;
+}
+
+sub list_recyclable {
+    my ($dbconfig) = @_;
+
+    my %recyclable;
+
+    my $dbh = $dbconfig->connect();
+    my $recycle = $dbh->prepare(
+        "SELECT volumename, lastwritten, volbytes, volstatus, volretention ".
+        "FROM media ".
+        "WHERE mediatype = 'File' AND ".
+        "   lastwritten + interval '$fuzz' < ".
+        "      NOW() -  volretention * interval '1 second'");
+
+    $recycle->execute();
+    my $vols = $recycle->fetchall_hashref('volumename');
+    for my $vol (sort {
+                          $vols->{$a}->{lastwritten} cmp $vols->{$b}->{lastwritten}
+                      } keys %{$vols})
+    {
+        # make structured data when/if we need it
+        my $info = "$vols->{$vol}->{volstatus} $vols->{$vol}->{lastwritten}  $vols->{$vol}->{volbytes}";
+        $recyclable{$vol} = $info;
+    }
+    return %recyclable;
+}
+
+my %deletable = list_error_only($dbconfig);
+unless ($error_only) {
+    %deletable = (%deletable, list_recyclable($dbconfig));
+}
+
+for my $vol (sort keys %deletable) {
+    my $file = "$datadirectory/$vol";
+    printf("%-22s %s%s\n", $vol, $deletable{$vol}, 
+           (-l $file ? " -> " . readlink($file) : ""));
+}
+
+if ($remove) {
+    my $baculaconf = (grep { -e $_ } qw(/etc/bareos/bareos-dir.conf /etc/bacula/bacula-dir.conf))[0];
+
+    if ($baculaconf) {
+        if (open(my $conf, $baculaconf)) {
+            my ($writeuser, $writepassword);
+            while (<$conf>) {
+                chomp;
+                s/(^|\s+)#.*//;
+                if (/dbuser\s*=\s*"(.*?)"/) {
+                    $writeuser = $1;
+                }
+                if (/dbpassword\s*=\s*"(.*?)"/) {
+                    $writepassword = $1;
+                }
+            }
+            close($conf);
+            if (defined $writeuser && defined $writepassword) {
+                $dbconfig->disconnect();
+                $dbconfig = new Bacula::DatabaseConfig('database-user' => $writeuser,
+                                                       'database-password' => $writepassword);
+            }
+        } else {
+            # not necessarily fatal, the password in the configuration may
+            # have update access
+            warn "$baculaconf: $!\n";
+        }
+    }
+
+    my $dbh = $dbconfig->connect(AutoCommit => 0);
+    unless (-d $datadirectory) {
+        die "$datadirectory: Directory not found\n";
+    }
+    
+    $| = 1;
+    print "OK to remove volumes? ";
+    my $ans = <STDIN>;
+    if ($ans !~ /^y/i) {
+        print "aborting.\n";
+        exit(0);
+    }
+    print "Removing from filesystem\n";
+    for my $vol (keys %deletable) {
+        if (-f "$datadirectory/$vol") {
+            if (-l "$datadirectory/$vol") {
+                my $target = readlink("$datadirectory/$vol");
+                my $filedir = "$datadirectory/$vol";
+                $filedir =~ s:/[^/]*?$::;
+                $target = "$filedir/$target" unless $target =~ m:^/:;
+                unlink($target) || warn "$target: $!\n";
+            }
+            unlink("$datadirectory/$vol") || warn "$vol: $!\n";
+        } else {
+            warn "$vol: no such file\n";
+        }
+    }
+
+    print "Removing from database\n";
+    print ".. deleting from Media\n";
+    my $delete_media = $dbh->prepare(
+        "DELETE FROM media WHERE volumename IN ('" .
+        join("','", keys %deletable) . "')");
+    my $rv = $delete_media->execute() or die $delete_media->errstr;
+    print ".... $rv rows deleted\n";
+
+    # now do the cascading delete
+
+    print ".. deleting from JobMedia\n";
+    my $delete_jobmedia = $dbh->prepare(
+        "DELETE FROM jobmedia
+             WHERE mediaid NOT IN (SELECT mediaid FROM Media)");
+    $rv = $delete_jobmedia->execute() or die $delete_jobmedia->errstr;
+    print ".... $rv rows deleted\n";
+
+    print ".. deleting from File\n";
+    my $delete_file = $dbh->prepare(
+        "DELETE FROM file
+             WHERE jobid NOT IN (SELECT jobid FROM jobmedia)");
+    $rv = $delete_file->execute() or die $delete_file->errstr;
+    print ".... $rv rows deleted\n";
+
+    $dbh->commit() or die $dbh->errstr;
+    print "All done.\n";
+}
