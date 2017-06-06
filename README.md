@@ -3,9 +3,6 @@ Purge unused file media in bacula/bareos backups
 
 **This version works with MySQL databases, if you use Postgresql, then please check the code first**
 
-Based on the 1.4 version of http://heim.ifi.uio.no/kjetilho/hacks/bacula-purge-unused-1.4.tar.gz
-http://heim.ifi.uio.no/kjetilho/hacks/#bacula-purge-unused
-
 Usage: `./bacula-purge-unused [--debug] [--truncate] [--remove] [--error-only] [options]`
 
 ```
@@ -40,3 +37,14 @@ database-user bareos
 database-password <my-db-password>
 ```
 
+##Install
+* Copy the two files on a location of your backup server, for example to `/opt/bacula-purge-unused`
+* If you have a separate storage daemon server, then copy them to that server, or make sure the directory server has access to the storage file system
+* Install the required perl libraries, you will need `libxml-simple-perl` and the dbi perl files for your database
+* `apt-get install libxml-simple-perl` 
+* create the /etc/bareos/database.cf file
+* start the application
+
+##Origins
+Based on the 1.4 version of http://heim.ifi.uio.no/kjetilho/hacks/bacula-purge-unused-1.4.tar.gz
+http://heim.ifi.uio.no/kjetilho/hacks/#bacula-purge-unused
